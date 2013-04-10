@@ -1,8 +1,11 @@
 
 zmq = {}
+zmq.PUB = 1
 zmq.SUB = 2
 zmq.REQ = 3
 zmq.REP = 4
+zmq.PULL = 7
+zmq.PUSH = 8
 zmq.uuid = function () {
     //from ipython project
     // http://www.ietf.org/rfc/rfc4122.txt
@@ -50,6 +53,9 @@ zmq.Context = function(ws_conn_string){
 }
     
 zmq.Context.prototype.connect = function(socket, zmq_conn_string, auth){
+    if (!auth) {
+		auth = {};
+	}
     auth['zmq_conn_string'] = zmq_conn_string;
     auth['socket_type'] = socket.socket_type;
     var msg = JSON.stringify(auth)
@@ -73,10 +79,16 @@ zmq.Context.prototype.Socket = function(socket_type){
     var fakesocket;
     if (socket_type === zmq.SUB){
 	fakesocket = new zmq.SubSocket(this);
+    }else if (socket_type === zmq.PUB){
+    fakesocket = new zmq.PubSocket(this);
     }else if (socket_type === zmq.REQ){
 	fakesocket =  new zmq.ReqSocket(this);
     }else if (socket_type === zmq.REP){
 	fakesocket =  new zmq.RepSocket(this);
+    }else if (socket_type === zmq.PUSH){
+    fakesocket = new zmq.PushSocket(this);
+    }else if (socket_type === zmq.PULL){
+    fakesocket = new zmq.PullSocket(this);
     }
     this.sockets[fakesocket.identity] = fakesocket;
     return fakesocket;
@@ -152,15 +164,60 @@ zmq.ReqSocket.prototype._handle = function(msg){
 
 
 zmq.SubSocket = function(ctx){
-    zmq.ReqSocket.call(this, ctx);
+    zmq.Socket.call(this, ctx);
     this.socket_type = zmq.SUB;
 }
 
-//prototype from req socket, because we need the auth functionality
 zmq.SubSocket.prototype = new zmq.Socket();
 zmq.SubSocket.prototype._handle = function(msg){
-    this.onmessage(msg);
+    this.onMessage(msg);
 }
+
+zmq.PubSocket = function(ctx){
+    zmq.Socket.call(this, ctx);
+    this.socket_type = zmq.PUB;
+}
+
+zmq.PubSocket.prototype = new zmq.Socket();
+zmq.PubSocket.prototype.send = function(msg, msg_type){
+    if (Array.isArray(msg)) {
+        var msgobj = this.construct_message(msg, msg_type)
+        this.ctx.send(JSON.stringify(msgobj));
+    } else {
+        throw 'Msg Parameter not of Type Array'
+    }
+}
+
+
+zmq.PushSocket = function(ctx){
+    zmq.Socket.call(this, ctx);
+    this.socket_type = zmq.PUSH;
+}
+
+zmq.PushSocket.prototype = new zmq.Socket();
+zmq.PushSocket.prototype.send = function(msg, msg_type){
+    if (Array.isArray(msg)) {
+        var msgobj = this.construct_message(msg, msg_type)
+        this._send(JSON.stringify(msgobj));
+    } else {
+        throw 'Msg Parameter not of Type Array'
+    }
+}
+zmq.PushSocket.prototype._send = function(msg){
+    this.ctx.send(msg);
+}
+
+
+zmq.PullSocket = function(ctx){
+    zmq.Socket.call(this, ctx);
+    this.socket_type = zmq.PULL;
+}
+
+zmq.PullSocket.prototype = new zmq.Socket();
+zmq.PullSocket.prototype._handle = function(msg){
+    this.onMessage(msg);
+}
+
 
 zmq.RepSocket = function(ctx){
     zmq.ReqSocket.call(this, ctx);
@@ -193,7 +250,7 @@ zmq.RepSocket.prototype._recv_buffer = function(){
 	var address = msgobj[0];
 	var content = msgobj[msgobj.length - 1];
 	this.address = address;
-	this.onmessage(content);
+	this.onMessage(content);
     }
 }
 
@@ -221,7 +278,7 @@ zmq.PubRPCServer = function(socket){
     this.socket = socket;
     var that = this;
     if (socket){
-	socket.onmessage = function(msg){
+	socket.onMessage = function(msg){
 	    that.handle_pub(msg);
 	}
     }
@@ -237,7 +294,7 @@ zmq.RPCServer = function(socket){
     this.socket = socket;
     var that = this;
     if (socket){
-	socket.onmessage = function(msg){
+	socket.onMessage = function(msg){
 	    that.handle(msg);
 	}
     }

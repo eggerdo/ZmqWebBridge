@@ -38,6 +38,24 @@ class ZmqGatewayFactory(object):
                                 RepGateway(zmq_conn_string,
                                            self.HWM,
                                            ctx=self.ctx)
+            elif socket_type == zmq.PUSH:
+                log.debug("spawning push socket %s" ,zmq_conn_string)
+                self.gateways[socket_type, zmq_conn_string] = \
+                                PushGateway(zmq_conn_string,
+                                           self.HWM,
+                                           ctx=self.ctx)
+            elif socket_type == zmq.PULL:
+                log.debug("spawning pull socket %s" ,zmq_conn_string)
+                self.gateways[socket_type, zmq_conn_string] = \
+                                PullGateway(zmq_conn_string,
+                                           self.HWM,
+                                           ctx=self.ctx)
+            elif socket_type == zmq.PUB:
+                log.debug("spawning pub socket %s" ,zmq_conn_string)
+                self.gateways[socket_type, zmq_conn_string] = \
+                                PubGateway(zmq_conn_string,
+                                           self.HWM,
+                                           ctx=self.ctx)
             else:
                 log.debug("spawning sub socket %s" ,zmq_conn_string) 
                 self.gateways[socket_type, zmq_conn_string] = \
@@ -89,7 +107,35 @@ class ZmqGateway(WebProxyHandler):
         except Exception as e:
             log.exception(e)
             self.deregister(identity)
-            
+     
+class PubGateway(ZmqGateway):
+    def __init__(self, zmq_conn_string, HWM, ctx=None):
+        super(PubGateway, self).__init__(zmq_conn_string, ctx=ctx)
+        self.s = ctx.socket(zmq.PUB)
+        if HWM:
+            self.s.setsockopt(zmq.HWM, HWM);
+        self.s.connect(zmq_conn_string)
+        self.queue = Queue.Queue()
+     
+    def send(self, identity, multipart_msg):
+        self.queue.put(multipart_msg)
+
+    def _send(self, multipart_msg):
+        multipart_msg = [str(x) for x in multipart_msg]
+        log.debug('sending %s', multipart_msg)
+        self.s.send_multipart(multipart_msg)
+
+    def start(self):
+        self.thread_send = spawn(self.run_send_zmq)
+
+    def run_send_zmq(self):
+        while True:
+            try:
+                msg = self.queue.get()
+                self._send(msg)
+            except Exception as e:
+                pass
+                   
 class SubGateway(ZmqGateway):
     def __init__(self, zmq_conn_string, HWM, ctx=None):
         super(SubGateway, self).__init__(zmq_conn_string, ctx=ctx)
@@ -101,11 +147,11 @@ class SubGateway(ZmqGateway):
 
     def run(self):
         while(True):
-            msg = self.s.recv(copy=True)
+            msg = self.s.recv_multipart(copy=True)
             try:
-                log.debug('subgateway, received %s', msg)
+                log.debug('SubGateway, received %s', msg)
                 for k in self.proxies.keys():
-                    if self.proxies[k].msgfilter in msg:
+                    if self.proxies[k].msgfilter in msg[0]:
                         self.send_proxy(k, msg)
             except Exception as e:
                 log.exception(e)
@@ -113,7 +159,57 @@ class SubGateway(ZmqGateway):
 
     def start(self):
         self.thread = spawn(self.run)
-        
+                 
+class PullGateway(ZmqGateway):
+    def __init__(self, zmq_conn_string, HWM, ctx=None):
+        super(PullGateway, self).__init__(zmq_conn_string, ctx=ctx)
+        self.s = ctx.socket(zmq.PULL)
+        if HWM:
+            self.s.setsockopt(zmq.HWM, HWM);
+        self.s.connect(zmq_conn_string)
+
+    def run(self):
+        while(True):
+            msg = self.s.recv_multipart(copy=True)
+            try:
+                log.debug('PullGateway, received %s', msg)
+                for k in self.proxies.keys():
+                    self.send_proxy(k, msg)
+            except Exception as e:
+                log.exception(e)
+                continue
+
+    def start(self):
+        self.thread = spawn(self.run)
+     
+class PushGateway(ZmqGateway):
+    def __init__(self, zmq_conn_string, HWM, ctx=None):
+        super(PushGateway, self).__init__(zmq_conn_string, ctx=ctx)
+        self.s = ctx.socket(zmq.PUSH)
+        if HWM:
+            self.s.setsockopt(zmq.HWM, HWM);
+        self.s.connect(zmq_conn_string)
+        self.queue = Queue.Queue()
+     
+    def send(self, identity, multipart_msg):
+        self.queue.put(multipart_msg)
+
+    def _send(self, multipart_msg):
+        multipart_msg = [str(x) for x in multipart_msg]
+        log.debug('sending %s', multipart_msg)
+        self.s.send_multipart(multipart_msg)
+
+    def start(self):
+        self.thread_send = spawn(self.run_send_zmq)
+
+    def run_send_zmq(self):
+        while True:
+            try:
+                msg = self.queue.get()
+                self._send(msg)
+            except Exception as e:
+                pass
+               
 class RepGateway(ZmqGateway):
     def __init__(self, zmq_conn_string, HWM, ctx=None):
         super(RepGateway, self).__init__(zmq_conn_string, ctx=ctx)
@@ -237,6 +333,12 @@ class BridgeWebProxyHandler(WebProxyHandler):
             proxy = ReqSocketProxy(identity)
         elif socket_type == zmq.REP:
             proxy = RepSocketProxy(identity)
+        elif socket_type == zmq.PUSH:
+            proxy = PushSocketProxy(identity)
+        elif socket_type == zmq.PULL:
+            proxy = PullSocketProxy(identity)
+        elif socket_type == zmq.PUB:
+            proxy = PubSocketProxy(identity)
         else:
             proxy = SubSocketProxy(identity, content.get('msgfilter', ''))
         gateway = self.gateway_factory.get(socket_type, zmq_conn_string)
@@ -321,6 +423,8 @@ class ReqSocketProxy(SocketProxy):
 class RepSocketProxy(SocketProxy):
     socket_type = zmq.REP
 
+class PubSocketProxy(SocketProxy):
+    socket_type = zmq.PUB;
 
 class SubSocketProxy(SocketProxy):
     socket_type = zmq.SUB
@@ -328,6 +432,11 @@ class SubSocketProxy(SocketProxy):
         super(SubSocketProxy, self).__init__(identity)
         self.msgfilter = msgfilter
 
+class PushSocketProxy(SocketProxy):
+    socket_type = zmq.PUSH;
+
+class PullSocketProxy(SocketProxy):
+    socket_type = zmq.PULL;
 
 
 """
@@ -362,12 +471,13 @@ class WsgiHandler(object):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     app = WsgiHandler()
-    server = pywsgi.WSGIServer(('127.0.0.1', 8000), app.wsgi_handle,
+    server = pywsgi.WSGIServer(('0.0.0.0', 9000), app.wsgi_handle,
                                # keyfile='/etc/nginx/server.key',
                                # certfile='/etc/nginx/server.crt',
                                handler_class=WebSocketHandler)
+    print "Starting ZmqWebBridge on Port 9000"
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print 'Shutting down gracefully.'
-        server.zmq_gateway_factory.shutdown()
+        app.zmq_gateway_factory.shutdown()
